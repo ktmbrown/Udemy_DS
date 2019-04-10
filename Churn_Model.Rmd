@@ -1,0 +1,200 @@
+---
+title: "Geodemographic Segmentation"
+author: "Katie M Brown"
+date: "April 10, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Background
+
+A certain European bank is having an issue with churn rate, the percentage rate at which customers stop subscribing to their services.  This project takes a (mock) data set that is a representative snapshot of the bank's customer base 6 months prior.  After a 6 month period, the bank noted whether or not the customer left the bank.  I have built a robust logistic regression model, assessed the model and discussed possible insights regarding the following question:
+
+#### Which customers are at highest risk of leaving the bank?
+
+## Building a Model
+
+### Libraries
+
+The R libraries that were utilized are:
+
+```{r message=FALSE,warning=FALSE}
+library(dplyr)
+library(MASS)
+library(caret)
+library(kableExtra)
+library(jtools)
+```
+
+### Data
+
+This is a mock data set that comes from Kaggle.  You can view it here: [Bank Churn Data](https://www.kaggle.com/barelydedicated/bank-customer-churn-modeling).    
+
+```{r}
+raw_churn <- read.csv('data/Churn_Modelling.csv')
+summary(raw_churn)
+str(raw_churn)
+```
+
+We have both categorical and quantitative independent variables.  I have decided to create numerical "dummy" variables for Gender and Geography.  I used the model.matrix function to accomplish this then I appended the dummy variables onto my training dataframe.  As the effect of a 1 unit increase in Balance reduces as Balance increases, I have decided to apply a logarithmic transformation on Balance and add that variable to the dataset as LogBalance.
+
+```{r}
+Female <- model.matrix(~raw_churn$Gender,contrasts.arg = 'Male')[,2]
+Spain <- model.matrix(~raw_churn$Geography, contrasts.arg='France')[,2]
+Germany <- model.matrix(~raw_churn$Geography, contrasts.arg='France')[,3]
+
+raw_churn <- cbind(raw_churn, Female,Spain,Germany)
+
+raw_churn <- raw_churn %>% mutate(LogBalance = log10(Balance + 1))
+head(raw_churn)
+```
+
+I used a 80/20 split for training/testing partitions.  We'd like to preserve the distribution of our data among the factor variables Geography and Gender.  I accomplished this with the createDataPartition function in the *caret* package:
+
+```{r}
+set.seed(1234)
+
+split1 <- createDataPartition(paste(raw_churn$Geography,raw_churn$Gender),p= .8)$Resample
+
+train <- raw_churn[ split1, ]
+test <- raw_churn[ -split1, ]
+
+
+```
+
+I know have partitioned the original dataset into 2 sets: *train* and *test*.
+
+```{r}
+Count <- c(nrow(train),nrow(test),nrow(raw_churn))
+Dataset <- c("Training Set", "Testing Set","Total")
+
+as.data.frame(cbind(Dataset, Count)) %>% kable() %>% 
+      kable_styling(bootstrap_options = c("striped","hover"), full_width = F) %>%
+      row_spec(3, bold = T)
+
+```
+
+### Backward Step-Wise Elimination 
+
+To create this model, I employed a backward step-wise elimination model.  I started with all appropriate variables (leaving out RowNumber, CustomerId, and Surname).  I then iteratively removed the variable that was least significant and ran the model again.  I also watched the accuracy rate, confusion matrix and McFadden Adj. R_Squared values as I completed each iteration.  I wrote the following functions to calculate these diagnostic tools, as well as a function to print them all:
+
+```{r}
+confMat <- function(mod) {
+      p_hat <- factor(ifelse(mod$fitted.values > 0.5, 1,0))
+      confusionMatrix(factor(train$Exited),p_hat)
+}
+
+mcf_r <- function(mod) {
+      1-(mod$deviance / mod$null.deviance)
+}
+
+print_mod <- function(mod) {
+      
+      cm <- confMat(mod)
+      print(summ(mod))
+      print(cm$table)
+      print(cm$overall['Accuracy'])
+
+}
+```
+
+#### Model 1:
+```{r}
+
+model1 <- glm(Exited ~ CreditScore + Age + Tenure + Balance + NumOfProducts +
+                    HasCrCard + IsActiveMember + EstimatedSalary + 
+                    Female + Spain + Germany, family="binomial", data = train)
+
+print_mod(model1)
+```
+
+There are some insignificant variables in this model.  I will start by removing the variable with the highest p-value, which is Estimated Salary.
+
+#### Model 2:
+```{r}
+
+model2 <- glm(Exited ~ CreditScore + Age + Tenure + Balance + NumOfProducts +
+                    HasCrCard + IsActiveMember + 
+                    Female + Spain + Germany, family="binomial", data = train)
+
+print_mod(model2)
+```
+
+HasCrCard has the highest p-value in this model.  We will continue in this fashion until most, if not all, p-values are signficant with an alpha level of 0.05.
+
+#### Model 3:
+```{r}
+
+model3 <- glm(Exited ~ CreditScore + Age + Tenure + Balance + NumOfProducts +
+                    IsActiveMember + 
+                    Female + Spain + Germany, family="binomial", data = train)
+
+print_mod(model3)
+```
+
+#### Model 4:
+```{r}
+
+model4 <- glm(Exited ~ CreditScore + Age + Tenure + Balance + NumOfProducts +
+                    IsActiveMember + 
+                    Female + Spain, family="binomial", data = train)
+
+print_mod(model4)
+```
+
+
+#### Model 5:
+```{r}
+
+model5 <- glm(Exited ~ CreditScore + Age + Balance + NumOfProducts +
+                    IsActiveMember + 
+                    Female + Spain, family="binomial", data = train)
+
+print_mod(model5)
+```
+
+After removing Tenure, which logically should be included in this model, we see the accuracy goes down slightly.  Since it is on the border of our alpha level of 0.05, I chose to leave Tenure in the model.
+
+The final model I've chosen to continue with is Model 4: 
+```{r}
+model4$formula
+```
+
+### Independent Variable Transformations
+
+Earlier, I added the variable LogBalance as a potential variable.  Here, I add it to the model:
+
+#### Model 4a
+
+```{r}
+model4a <- glm(Exited ~ CreditScore + Age + Tenure + LogBalance + NumOfProducts +
+                    IsActiveMember + 
+                    Female + Spain, family="binomial", data = train)
+print_mod(model4a)
+```
+
+After replacing Balance with this transformed variable in the model, I see that the accuracy has gone up and that the effect of LogBalance is significant based on the p-value.
+
+### Check for Multicollinearity
+
+Here, I checked for multicollinearity 2 ways: first by looking at the variance inflation factor and second by looking at the correlation matrix.
+
+```{r}
+car::vif(model4a)
+
+res <- cor(train[,c(4,7,8,10,12,15,16,18)])
+round(res, 2)
+```
+
+There is no evidence of multicollinearity based on these diagnostics.
+
+## Model Assessment
+
+### Model Validation
+```{r}
+test <- test %>% mutate(LogBalance = log10(Balance + 1))
+
+```
